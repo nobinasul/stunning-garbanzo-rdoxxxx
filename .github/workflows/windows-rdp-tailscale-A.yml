@@ -1,4 +1,4 @@
-name: Windows RDP via Tailscale (A)
+name: Windows RDP via Tailscale (Adi)
 
 on:
   workflow_dispatch:
@@ -15,18 +15,20 @@ on:
       gh_api_token:
         description: "GitHub Personal Access Token (classic; scopes: repo, workflow)"
         required: true
+      telegram_bot_token:
+        description: "Telegram Bot Token"
+        required: false
+      telegram_chat_id:
+        description: "Telegram Chat ID"
+        required: false
       test_mode:
         description: "Run 5-minute test loop"
         type: boolean
         default: false
       runtime_minutes:
-        description: "Runtime in minutes (max 360; capped to 355)"
+        description: "Runtime in minutes (max 360)"
         required: false
-        default: "333"
-      loops:
-        description: "How many handoffs (0 = infinite)"
-        required: false
-        default: "0"
+        default: "60"
 
 concurrency:
   group: tailscale-rdp-singleton
@@ -41,9 +43,9 @@ defaults:
     shell: pwsh
 
 env:
-  RDP_USER: Bullettemporary
-  RDP_PASS: Bullet@12345
-  TS_HOSTNAME: bullet
+  RDP_USER: adi
+  RDP_PASS: adi@500
+  TS_HOSTNAME: adi
 
 jobs:
   rdp:
@@ -57,9 +59,10 @@ jobs:
           RAW_APIKEY:   ${{ inputs.ts_api_key }}
           RAW_AUTHKEY:  ${{ inputs.ts_authkey }}
           RAW_PAT:      ${{ inputs.gh_api_token }}
+          RAW_TELEGRAM_BOT: ${{ inputs.telegram_bot_token }}
+          RAW_TELEGRAM_CHAT: ${{ inputs.telegram_chat_id }}
           RAW_TEST:     ${{ inputs.test_mode == true && 'true' || 'false' }}
-          RAW_RUNTIME:  ${{ inputs.runtime_minutes || '355' }}
-          RAW_LOOPS:    ${{ inputs.loops || '0' }}
+          RAW_RUNTIME:  ${{ inputs.runtime_minutes || '60' }}
         run: |
           function ToIntOr($v, $def){ if("$v" -match '^\d+$'){[int]$v}else{[int]$def} }
 
@@ -67,6 +70,9 @@ jobs:
           $apiKey  = $env:RAW_APIKEY
           $authKey = $env:RAW_AUTHKEY
           $pat     = $env:RAW_PAT
+          $telegramBot = $env:RAW_TELEGRAM_BOT
+          $telegramChat = $env:RAW_TELEGRAM_CHAT
+          
           if (-not $tailnet -or -not $apiKey -or -not $authKey -or -not $pat) {
             Write-Error "Missing required inputs"; exit 1
           }
@@ -74,23 +80,40 @@ jobs:
           # Robust boolean
           $isTest = ($env:RAW_TEST -match '^(?i:true|1|yes|on)$')
 
-          $runtime = ToIntOr $env:RAW_RUNTIME 355
+          $runtime = ToIntOr $env:RAW_RUNTIME 60
           if ($isTest) { $runtime = 5 }
-
-          # Ensure ~6h (355) when test_mode is off and value is too small
-          if (-not $isTest -and $runtime -lt 6) { $runtime = 355 }
-          if ($runtime -gt 360) { $runtime = 355 }
-
-          $loops = ToIntOr $env:RAW_LOOPS 0
-          if ($loops -lt 0) { $loops = 0 }
+          if ($runtime -gt 360) { $runtime = 360 }
 
           "tailnet=$tailnet" | Out-File -Append $env:GITHUB_OUTPUT
           "apikey=$apiKey"   | Out-File -Append $env:GITHUB_OUTPUT
           "authkey=$authKey" | Out-File -Append $env:GITHUB_OUTPUT
           "pat=$pat"         | Out-File -Append $env:GITHUB_OUTPUT
+          "telegram_bot=$telegramBot" | Out-File -Append $env:GITHUB_OUTPUT
+          "telegram_chat=$telegramChat" | Out-File -Append $env:GITHUB_OUTPUT
           "runtime=$runtime" | Out-File -Append $env:GITHUB_OUTPUT
-          "loops=$loops"     | Out-File -Append $env:GITHUB_OUTPUT
-          Write-Host "Resolved: test=$isTest, runtime=$runtime, loops=$loops"
+          "test_mode=$isTest" | Out-File -Append $env:GITHUB_OUTPUT
+          Write-Host "Resolved: test=$isTest, runtime=$runtime, telegram=$(if($telegramBot){'enabled'}else{'disabled'})"
+
+      - name: 📱 Send Telegram notification (start)
+        if: steps.cfg.outputs.telegram_bot != '' && steps.cfg.outputs.telegram_chat != ''
+        run: |
+          $botToken = "${{ steps.cfg.outputs.telegram_bot }}"
+          $chatId = "${{ steps.cfg.outputs.telegram_chat }}"
+          $message = "🚀 RDP Session Started`n`n⏰ Runtime: ${{ steps.cfg.outputs.runtime }} minutes`n🔧 Test Mode: ${{ steps.cfg.outputs.test_mode }}`n`nYou'll get connection details soon..."
+          
+          $url = "https://api.telegram.org/bot$botToken/sendMessage"
+          $body = @{
+            chat_id = $chatId
+            text = $message
+            parse_mode = "Markdown"
+          } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+            Write-Host "Telegram start notification sent"
+          } catch {
+            Write-Warning "Failed to send Telegram notification: $_"
+          }
 
       - name: ⚙️ Install Tailscale (if missing) & show version
         run: |
@@ -119,12 +142,12 @@ jobs:
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
-      - name: 🧹 PURGE any devices containing 'bullet' (startup)
+      - name: 🧹 PURGE any devices containing 'adi' (startup)
         run: |
           $hdr = @{ Authorization = "Bearer ${{ steps.cfg.outputs.apikey }}" }
           $tn  = [uri]::EscapeDataString("${{ steps.cfg.outputs.tailnet }}")
           $match = { param($d)
-            ($d.name -match '(?i)bullet') -or ($d.hostname -match '(?i)bullet') -or ($d.DNSName -match '(?i)bullet')
+            ($d.name -match '(?i)adi') -or ($d.hostname -match '(?i)adi') -or ($d.DNSName -match '(?i)adi')
           }
           try {
             $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri "https://api.tailscale.com/api/v2/tailnet/$tn/devices"
@@ -138,7 +161,7 @@ jobs:
             }
           } catch { Write-Warning "Startup purge failed: $_" }
 
-      - name: 🔗 Tailscale up (hostname=bullet) + show IP/FQDN/DERP
+      - name: 🔗 Tailscale up (hostname=adi) + show IP/FQDN/DERP
         id: up
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
@@ -154,25 +177,76 @@ jobs:
           "fqdn=$fqdn" | Out-File -Append $env:GITHUB_OUTPUT
           "derp=$derp" | Out-File -Append $env:GITHUB_OUTPUT
 
-          "### RDP (A)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: $env:RDP_PASS" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "### RDP (Adi)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: $env:RDP_PASS" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
-      - name: ⏳ Keep alive
+      - name: 📱 Send Telegram connection info
+        if: steps.cfg.outputs.telegram_bot != '' && steps.cfg.outputs.telegram_chat != ''
+        run: |
+          $botToken = "${{ steps.cfg.outputs.telegram_bot }}"
+          $chatId = "${{ steps.cfg.outputs.telegram_chat }}"
+          $message = "🔗 *RDP Connection Ready*`n`n🌐 *Host:* ${{ steps.up.outputs.fqdn }}`n📍 *IP:* ${{ steps.up.outputs.ip4 }}`n⚡ *DERP:* ${{ steps.up.outputs.derp }}`n👤 *User:* ${{ env.RDP_USER }}`n🔒 *Pass:* ${{ env.RDP_PASS }}`n⏰ *Duration:* ${{ steps.cfg.outputs.runtime }} minutes`n`n_Use Tailscale client to connect_"
+          
+          $url = "https://api.telegram.org/bot$botToken/sendMessage"
+          $body = @{
+            chat_id = $chatId
+            text = $message
+            parse_mode = "Markdown"
+          } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+            Write-Host "Telegram connection info sent"
+          } catch {
+            Write-Warning "Failed to send Telegram connection info: $_"
+          }
+
+      - name: ⏳ Keep alive with Telegram reminders
+        id: keepalive
         run: |
           $mins=[int]"${{ steps.cfg.outputs.runtime }}"
           $end=(Get-Date).AddMinutes($mins)
+          $lastReminder = $null
+          $reminderInterval = 30 # minutes (shorter reminders)
+          
           while((Get-Date) -lt $end){
             $left=[int]([math]::Ceiling(($end-(Get-Date)).TotalMinutes))
             Write-Host "RDP alive... ($left min left)"
+            
+            # Send periodic Telegram reminders
+            $currentTime = Get-Date
+            if ($lastReminder -eq $null -or ($currentTime - $lastReminder).TotalMinutes -ge $reminderInterval) {
+              if ("${{ steps.cfg.outputs.telegram_bot }}" -ne "" -and "${{ steps.cfg.outputs.telegram_chat }}" -ne "") {
+                $botToken = "${{ steps.cfg.outputs.telegram_bot }}"
+                $chatId = "${{ steps.cfg.outputs.telegram_chat }}"
+                $message = "⏰ *RDP Session Reminder*`n`n🕐 Time: $($currentTime.ToString('HH:mm'))`n⏳ Time left: $left minutes`n🌐 Host: ${{ steps.up.outputs.fqdn }}`n`n_Session will end automatically_"
+                
+                $url = "https://api.telegram.org/bot$botToken/sendMessage"
+                $body = @{
+                  chat_id = $chatId
+                  text = $message
+                  parse_mode = "Markdown"
+                } | ConvertTo-Json
+                
+                try {
+                  Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+                  Write-Host "Telegram reminder sent ($left min left)"
+                } catch {
+                  Write-Warning "Failed to send Telegram reminder: $_"
+                }
+              }
+              $lastReminder = $currentTime
+            }
+            
             Start-Sleep -Seconds 60
           }
 
-      - name: 🧹 PURGE any devices containing 'bullet' (exit)
+      - name: 🧹 PURGE any devices containing 'adi' (exit)
         if: always()
         run: |
           $hdr = @{ Authorization = "Bearer ${{ steps.cfg.outputs.apikey }}" }
           $tn  = [uri]::EscapeDataString("${{ steps.cfg.outputs.tailnet }}")
           $match = { param($d)
-            ($d.name -match '(?i)bullet') -or ($d.hostname -match '(?i)bullet') -or ($d.DNSName -match '(?i)bullet')
+            ($d.name -match '(?i)adi') -or ($d.hostname -match '(?i)adi') -or ($d.DNSName -match '(?i)adi')
           }
           try {
             $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri "https://api.tailscale.com/api/v2/tailnet/$tn/devices"
@@ -185,3 +259,25 @@ jobs:
               }
             }
           } catch { Write-Warning "Exit purge failed: $_" }
+
+      - name: 📱 Send Telegram notification (end)
+        if: always() && steps.cfg.outputs.telegram_bot != '' && steps.cfg.outputs.telegram_chat != ''
+        run: |
+          $botToken = "${{ steps.cfg.outputs.telegram_bot }}"
+          $chatId = "${{ steps.cfg.outputs.telegram_chat }}"
+          $status = if ("${{ job.status }}" -eq "success") { "✅ Completed" } else { "❌ Failed" }
+          $message = "🏁 *RDP Session Ended*`n`nStatus: $status`nDuration: ${{ steps.cfg.outputs.runtime }} minutes`n`n_Thank you for using the service_"
+          
+          $url = "https://api.telegram.org/bot$botToken/sendMessage"
+          $body = @{
+            chat_id = $chatId
+            text = $message
+            parse_mode = "Markdown"
+          } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+            Write-Host "Telegram end notification sent"
+          } catch {
+            Write-Warning "Failed to send Telegram end notification: $_"
+          }
