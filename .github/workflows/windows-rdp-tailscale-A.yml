@@ -1,4 +1,4 @@
-name: Windows RDP via Tailscale
+name: Windows RDP via Tailscale (Adi)
 
 on:
   workflow_dispatch:
@@ -44,7 +44,7 @@ defaults:
 
 env:
   RDP_USER: adi
-  RDP_PASS: adi@500
+  RDP_PASS: rzadi@500#  # ✅ Your chosen password
   TS_HOSTNAME: adi
 
 jobs:
@@ -129,18 +129,41 @@ jobs:
 
       - name: 🔐 Enable RDP user + firewall
         run: |
-          $u="${{ env.RDP_USER }}"; $p="${{ env.RDP_PASS }}"
-          $sec = ConvertTo-SecureString $p -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
-            Add-LocalGroupMember -Group Administrators -Member $u
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          $u = "adi"
+          $p = "rzadi@500#"
+          
+          Write-Host "Creating RDP user: $u"
+          
+          # Method 1: Use net user command (bypasses PowerShell restrictions)
+          Write-Host "Creating user with net user command..."
+          cmd /c "net user $u $p /add /y /expires:never"
+          
+          if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ User created successfully with net user"
           } else {
-            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
-            Enable-LocalUser -Name $u
+              Write-Host "❌ net user failed, trying PowerShell method..."
+              # Method 2: Try PowerShell with secure string
+              try {
+                  $sec = ConvertTo-SecureString $p -AsPlainText -Force
+                  New-LocalUser -Name $u -Password $sec -AccountNeverExpires -Description "RDP User"
+                  Write-Host "✅ User created with PowerShell"
+              } catch {
+                  Write-Host "❌ PowerShell method failed: $_"
+                  exit 1
+              }
           }
+          
+          # Add to required groups
+          Write-Host "Adding user to groups..."
+          cmd /c "net localgroup administrators $u /add" 2>$null
+          cmd /c "net localgroup \"Remote Desktop Users\" $u /add" 2>$null
+          
+          # Enable RDP
+          Write-Host "Enabling RDP..."
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+          
+          Write-Host "✅ RDP setup completed successfully"
 
       - name: 🧹 PURGE any devices containing 'adi' (startup)
         run: |
@@ -206,7 +229,7 @@ jobs:
           $mins=[int]"${{ steps.cfg.outputs.runtime }}"
           $end=(Get-Date).AddMinutes($mins)
           $lastReminder = $null
-          $reminderInterval = 30 # minutes (shorter reminders)
+          $reminderInterval = 30 # minutes
           
           while((Get-Date) -lt $end){
             $left=[int]([math]::Ceiling(($end-(Get-Date)).TotalMinutes))
