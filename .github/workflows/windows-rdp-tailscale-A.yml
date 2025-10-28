@@ -44,6 +44,7 @@ defaults:
 
 env:
   RDP_USER: adi
+  RDP_PASS: P@ssw0rd123!  # ✅ Fixed working password
   TS_HOSTNAME: adi
 
 jobs:
@@ -126,88 +127,20 @@ jobs:
           Start-Service Tailscale -ErrorAction SilentlyContinue
           & "C:\Program Files\Tailscale\tailscale.exe" version
 
-      - name: 🔐 BULLETPROOF RDP User Setup
-        id: rdp_setup
+          - name: 🔐 Enable RDP user + firewall
         run: |
-          $u = "adi"
-          Write-Host "🚀 Starting BULLETPROOF RDP setup for user: $u"
-          
-          # Method 1: Try multiple GUARANTEED WORKING passwords
-          $passwords = @(
-              "P@ssw0rd123!",           # Classic meets all requirements
-              "Admin123!@#",            # Another strong one
-              "WindowsRDP@2024",        # Current year
-              "Aa123456!",              # Simple but meets complexity
-              "Password123!",           # Most basic that should work
-              "Welcome123!",            # Another common one
-              "Spring2024!",            # Seasonal
-              "Winter2024!"             # Alternative seasonal
-          )
-          
-          $success = $false
-          $finalPassword = ""
-          
-          foreach ($p in $passwords) {
-              Write-Host "🔄 Trying password: $p"
-              
-              # Delete user if exists first (clean slate)
-              cmd /c "net user $u /delete" 2>$null
-              Start-Sleep -Seconds 1
-              
-              # Try to create user with this password
-              $result = cmd /c "net user $u $p /add /y /expires:never" 2>&1
-              
-              if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✅ SUCCESS! User created with password: $p"
-                  $success = $true
-                  $finalPassword = $p
-                  break
-              } else {
-                  Write-Host "❌ Failed with password: $p"
-              }
-              
-              Start-Sleep -Seconds 1
+          $u="${{ env.RDP_USER }}"; $p="${{ env.RDP_PASS }}"
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group Administrators -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Enable-LocalUser -Name $u
           }
-          
-          if (-not $success) {
-              Write-Host "💥 ALL PASSWORDS FAILED! Trying emergency method..."
-              
-              # EMERGENCY: Create user without password first, then set it
-              cmd /c "net user $u /add /active:yes /expires:never" 2>$null
-              Start-Sleep -Seconds 2
-              
-              # Now try to set password
-              $emergencyPass = "P@ssw0rd123!"
-              $result = cmd /c "net user $u $emergencyPass" 2>&1
-              
-              if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✅ EMERGENCY METHOD WORKED! Password: $emergencyPass"
-                  $finalPassword = $emergencyPass
-                  $success = $true
-              }
-          }
-          
-          if (-not $success) {
-              Write-Error "💥 CRITICAL: Could not create RDP user with any method"
-              exit 1
-          }
-          
-          # Add to required groups
-          Write-Host "➕ Adding user to Administrator group..."
-          cmd /c "net localgroup administrators $u /add" 2>$null
-          
-          Write-Host "➕ Adding user to Remote Desktop Users group..."
-          cmd /c "net localgroup \"Remote Desktop Users\" $u /add" 2>$null
-          
-          # Enable RDP
-          Write-Host "🔓 Enabling RDP..."
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-          
-          # Store the working password
-          "RDP_PASSWORD=$finalPassword" | Out-File -Append $env:GITHUB_OUTPUT
-          Write-Host "🎉 RDP setup COMPLETED SUCCESSFULLY!"
-          Write-Host "🔑 Final password: $finalPassword"
 
       - name: 🧹 PURGE any devices containing 'adi' (startup)
         run: |
@@ -244,15 +177,14 @@ jobs:
           "fqdn=$fqdn" | Out-File -Append $env:GITHUB_OUTPUT
           "derp=$derp" | Out-File -Append $env:GITHUB_OUTPUT
 
-          "### RDP (Adi)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: ${{ steps.rdp_setup.outputs.RDP_PASSWORD }}" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "### RDP (Adi)`nHost: $env:TS_HOSTNAME`nIPv4: $ip4`nMagicDNS: $fqdn`nDERP: $derp`nUser: $env:RDP_USER`nPass: $env:RDP_PASS" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: 📱 Send Telegram connection info
         if: steps.cfg.outputs.telegram_bot != '' && steps.cfg.outputs.telegram_chat != ''
         run: |
           $botToken = "${{ steps.cfg.outputs.telegram_bot }}"
           $chatId = "${{ steps.cfg.outputs.telegram_chat }}"
-          $actualPass = "${{ steps.rdp_setup.outputs.RDP_PASSWORD }}"
-          $message = "🔗 *RDP Connection Ready*`n`n🌐 *Host:* ${{ steps.up.outputs.fqdn }}`n📍 *IP:* ${{ steps.up.outputs.ip4 }}`n⚡ *DERP:* ${{ steps.up.outputs.derp }}`n👤 *User:* $env:RDP_USER`n🔒 *Pass:* $actualPass`n⏰ *Duration:* ${{ steps.cfg.outputs.runtime }} minutes`n`n_Use Tailscale client to connect_"
+          $message = "🔗 *RDP Connection Ready*`n`n🌐 *Host:* ${{ steps.up.outputs.fqdn }}`n📍 *IP:* ${{ steps.up.outputs.ip4 }}`n⚡ *DERP:* ${{ steps.up.outputs.derp }}`n👤 *User:* $env:RDP_USER`n🔒 *Pass:* $env:RDP_PASS`n⏰ *Duration:* ${{ steps.cfg.outputs.runtime }} minutes`n`n_Use Tailscale client to connect_"
           
           $url = "https://api.telegram.org/bot$botToken/sendMessage"
           $body = @{
